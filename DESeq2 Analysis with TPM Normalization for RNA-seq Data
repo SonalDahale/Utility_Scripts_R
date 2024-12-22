@@ -1,0 +1,120 @@
+# Set the working directory where your scripts are stored
+setwd("C:/Users/........./scripts")
+
+# Load necessary libraries
+library(DESeq2)       # For differential expression analysis
+library(tidyverse)    # For data manipulation and visualization
+library(GenomicFeatures)  # For handling genomic data, including gene lengths
+
+# Load count matrix and metadata
+cts <- as.matrix(read.csv("test_cts.txt", sep = "\t", row.names = 1, header=TRUE))  # Read count data
+coldata <- read.csv("test_col_data.txt", row.names=1, sep="\t")  # Read metadata
+
+# #### Fixing sorting error in the count matrix ####
+cts <- apply(cts, 2, function(x) gsub('\\s+', '', x))  # Remove whitespace in the count data
+cts_data <- as.matrix(cts)  # Convert to matrix
+cts_data <- apply(cts_data, 2, as.numeric)  # Convert matrix values to numeric
+rownames(cts_data) <- row.names(cts)  # Set row names (gene names)
+colnames(cts_data) <- gsub("NG\\.", "NG-", colnames(cts_data))  # Rename columns
+cts_data[is.na(cts_data)] <- 0  # Replace NAs with 0s
+
+# #### Standardize columns in metadata (optional) ####
+coldata$Fat <- scale(coldata$Fat, center = TRUE)  # Standardize Fat
+coldata$Protein <- scale(coldata$Protein, center = TRUE)  # Standardize Protein
+coldata$Lactation <- scale(coldata$Lactation, center = TRUE)  # Standardize Lactation
+coldata$Rumination <- scale(coldata$Rumination, center = TRUE)  # Standardize Rumination
+
+# #### Multi-variable model design ####
+multi.model <- as.formula(~ S**** + F** + P*** + R***** + L***** + R****** + C*****)  # Define the model
+model.matrix(multi.model, data = coldata)  # Create the model matrix
+coldata <- mutate(coldata, Condition = fct_relevel(Condition, "Poor"))  # Set 'Poor' as the reference level for Condition
+
+# Create DESeqDataSet for differential expression analysis
+dds <- DESeqDataSetFromMatrix(countData = cts_data, colData = coldata, design = multi.model)
+
+# Filter genes with low counts (keeping only genes with counts greater than 5 across samples)
+keep <- rowSums(counts(dds)) > 5
+dds.filt <- dds[keep,]
+
+# Perform differential expression analysis
+dds <- DESeq(dds.filt)
+results.condition <- results(dds)  # Retrieve results from DESeq
+summary(results.condition)  # Summary of the DE results
+
+# #### Count the number of differentially expressed genes ####
+sum(results.condition$padj < 0.05 & results.condition$log2FoldChange > 0, na.rm = TRUE)  # Number of up-regulated genes
+sum(results.condition$padj < 0.05 & results.condition$log2FoldChange < 0, na.rm = TRUE)  # Number of down-regulated genes
+
+# Filter for significantly differentially expressed genes
+sign_genes <- subset(results.condition, padj < 0.05)
+summary(sign_genes)  # Summary of significant genes
+
+# Save results to file
+write.csv(sign_genes, file = "scaled_deseq2.csv")  # Save significant genes to a CSV file
+
+#### PCA Plotting ####
+
+# Subset the DESeqDataSet to only include significantly expressed genes
+dds_sign_genes <- dds[rownames(dds) %in% rownames(sign_genes),]
+
+# Perform Variance Stabilizing Transformation (VST) for PCA analysis
+vsd <- vst(dds_sign_genes, blind=FALSE)
+
+# Create PCA plot based on Condition
+plotPCA(vsd, intgroup = "Condition")
+
+#### Get TPM from Raw Counts ####
+
+# 1. Retrieve gene lengths
+txdb <- makeTxDbFromGFF('Bos_taurus.ARS-UCD1.2.110.gtf')  # Load gene annotation file (GTF)
+all.genes <- genes(txdb)  # Retrieve all genes
+my.genes <- rownames(cts_data)  # Genes in the count matrix
+
+# 2. Calculate TPM (Transcripts Per Million)
+my.genes.lengths <- width(all.genes[my.genes])  # Get the gene lengths
+names(my.genes.lengths) <- my.genes  # Assign gene names to their lengths
+
+# Function to calculate TPM
+r_tpm <- function(ct,len) {
+  cts_tpm <- sweep(ct, MARGIN=1, (len/10^4), `/`)  # Normalize counts by gene length
+  scf <- colSums(cts_tpm)/(10^6)  # Scale to million reads
+  return(sweep(cts_tpm, 2, scf, `/`))  # Normalize by scaling factor
+}
+
+# Calculate TPM for the count matrix
+tpm_normalized_data <- r_tpm(cts_data, my.genes.lengths)
+
+#### Extract Top Genes Based on Differential Expression Results ####
+
+# Sort results by p-value
+sorted_genes <- sign_genes[order(sign_genes$padj), ]
+
+# Select top 500 genes with the lowest adjusted p-values
+top_500_genes <- head(sorted_genes, n = 500)
+
+# Subset TPM data for top 500 genes
+gene_names <- rownames(top_500_genes)  # Extract gene names of top 500 genes
+tpm_data_top_500 <- tpm_normalized_data[gene_names, ]  # Subset TPM data
+
+# Calculate average TPM for "Good" and "Poor" conditions for the top 500 genes
+average_tpm_good_yield <- colMeans(tpm_data_top_500[, coldata$Condition == "Good"])
+average_tpm_poor_yield <- colMeans(tpm_data_top_500[, coldata$Condition == "Poor"])
+
+# Create data frames to store average TPM for "Good" and "Poor" conditions
+gene_avg_tpm_good <- data.frame(GeneName = rownames(tpm_data_top_500), AverageTPMGood = average_tpm_good_yield)
+gene_avg_tpm_poor <- data.frame(GeneName = rownames(tpm_data_top_500), AverageTPMPoor = average_tpm_poor_yield)
+
+# Save average TPM data to CSV files
+write.csv(gene_avg_tpm_good_yield, "gene_average_tpm_good.txt")
+write.csv(gene_avg_tpm_poor_yield, "gene_average_tpm_poor.txt")
+
+# Combine top 100 genes and their average TPM values
+top_100_genes_with_avg_tpm <- data.frame(
+  Gene = gene_names,
+  Average_TPM_Good_Yield = average_tpm_good_yield,
+  Average_TPM_Poor_Yield = average_tpm_poor_yield
+)
+
+# Output the final results for inspection
+print(top_100_genes_with_avg_tpm)
+
